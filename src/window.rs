@@ -100,6 +100,11 @@ where
     bg_color: Rgba,
     close_requested: bool,
     repaint_after: Option<Instant>,
+    /// Texture changes from passes that were run but not rendered. egui hands each pass's
+    /// texture delta out only once, so dropping it loses newly rasterized glyphs for good
+    /// (blank letters until the font atlas is rebuilt). They are applied with the next
+    /// rendered pass instead.
+    pending_textures: egui::TexturesDelta,
 }
 
 impl<State, U> EguiWindow<State, U>
@@ -201,6 +206,7 @@ where
             bg_color,
             close_requested,
             repaint_after: Some(start_time),
+            pending_textures: egui::TexturesDelta::default(),
         }
     }
 
@@ -346,6 +352,12 @@ where
         };
 
         if do_repaint_now {
+            // Older texture changes first, then this pass's own.
+            if !self.pending_textures.is_empty() {
+                let mut textures = std::mem::take(&mut self.pending_textures);
+                textures.append(std::mem::take(&mut full_output.textures_delta));
+                full_output.textures_delta = textures;
+            }
             self.renderer.render(
                 #[cfg(feature = "opengl")]
                 window,
@@ -357,9 +369,13 @@ where
             );
 
             self.repaint_after = None;
-        } else if let Some(repaint_after) = now.checked_add(viewport_output.repaint_delay) {
-            // Schedule to repaint after the requested time has elapsed.
-            self.repaint_after = Some(repaint_after);
+        } else {
+            self.pending_textures
+                .append(std::mem::take(&mut full_output.textures_delta));
+            if let Some(repaint_after) = now.checked_add(viewport_output.repaint_delay) {
+                // Schedule to repaint after the requested time has elapsed.
+                self.repaint_after = Some(repaint_after);
+            }
         }
 
         for command in full_output.platform_output.commands {
